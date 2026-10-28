@@ -21,6 +21,7 @@ import {
 import * as TextGeneration from "./TextGeneration.ts";
 import { sanitizeThreadTitle } from "@t3tools/provider-core/server/textGenerationUtils";
 import { makeClaudeTextGeneration } from "./ClaudeTextGeneration.ts";
+import { ClaudeSettingsLaunchArgError } from "../provider/Drivers/ClaudeLaunchArgSettings.ts";
 import { writeFakeCli } from "@t3tools/provider-testing/fakeCli";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
@@ -318,6 +319,62 @@ it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
           }),
       );
     }),
+  );
+
+  // regression: #15073 fixed the --settings launch argument for turns, not text generation
+  it.effect.each([
+    `--settings '{"env":{"ANTHROPIC_VERTEX_PROJECT_ID":"launch-project"},"disableAllHooks":false}'`,
+    "--settings user-settings.json",
+  ])("merges %s beneath the text generation settings", (launchArgs) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-claude-text-settings-" });
+      yield* fs.writeFileString(
+        path.join(cwd, "user-settings.json"),
+        '{"env":{"ANTHROPIC_VERTEX_PROJECT_ID":"launch-project"},"disableAllHooks":false}',
+      );
+      return yield* withFakeClaudeEnv(
+        {
+          output: JSON.stringify({ structured_output: { title: "Use launch settings" } }),
+          argsMustContain: `--settings {"env":{"ANTHROPIC_VERTEX_PROJECT_ID":"launch-project"},"disableAllHooks":true}`,
+          claudeConfig: { launchArgs },
+        },
+        (textGeneration) =>
+          textGeneration.generateThreadTitle({
+            cwd,
+            message: "thread title",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("claudeAgent"),
+              model: SYNTHETIC_CLAUDE_STANDARD_MODEL,
+            },
+          }),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("fails on a --settings launch argument that is not a JSON object", () =>
+    withFakeClaudeEnv(
+      {
+        output: JSON.stringify({ structured_output: { title: "Ignored settings" } }),
+        claudeConfig: { launchArgs: `--settings '{"env":{"ANTHROPIC_API_KEY":"secret"},'` },
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const error = yield* Effect.flip(
+            textGeneration.generateThreadTitle({
+              cwd: process.cwd(),
+              message: "thread title",
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("claudeAgent"),
+                model: SYNTHETIC_CLAUDE_STANDARD_MODEL,
+              },
+            }),
+          );
+
+          expect(error.detail).toBe(new ClaudeSettingsLaunchArgError({}).message);
+        }),
+    ),
   );
 
   it.effect.each([
